@@ -1,90 +1,109 @@
-# Incremental Video Transcript Clip Extraction
+# Video Transcript Clip Extraction Pipeline
 
-This repository contains a **Google Colab notebook prototype** for turning a
-video and a producer-tagged transcript into timed MP4 clips, then deciding what
-can be reused after the transcript changes.
+This repository demonstrates, in a Google Colab notebook, the pipeline behind
+a **video clipping agent**: start with a source video and a producer-tagged
+transcript, resolve transcript segments to media timestamps, render the selected
+segments as MP4 clips, and preserve enough state to plan an incremental rerun
+when the transcript changes.
 
 ```text
-video + tagged transcript
+FIRST RUN
+video.mp4 + transcript.json
         |
         v
-rough timing -> WhisperX alignment -> ffmpeg clips -> manifest + saved state
-                                                        |
-edited transcript -> diff + semantic comparison --------+
+ingest -> locate make_clip segments -> transcribe audio -> align known text
+        -> verify boundaries -> ffmpeg cut -> manifest.json + state.json
+
+LATER RUN (prototype planner)
+edited transcript + prior manifest/state
         |
         v
-REUSE / PATCH / FULL_REALIGN / NEW / VERIFY_SHIFT / REMOVE
-        |
-        v
-REUSE_CLIP / RECUT / CUT_NEW / RETIRE_CLIP
+exact diff -> semantic comparison -> alignment decisions -> clip decisions
+        |                                      |
+        v                                      v
+REUSE / PATCH / FULL_REALIGN / NEW     REUSE_CLIP / RECUT / CUT_NEW
+VERIFY_SHIFT / REMOVE                  / RETIRE_CLIP
 ```
 
 > [!IMPORTANT]
-> This is a research notebook, not yet a packaged command-line agent. The
-> notebook demonstrates the complete baseline flow and prototypes the
-> incremental decision logic, but the second-run timestamps are currently
-> mocked rather than produced by a real windowed alignment. Read
-> [Current limitations](#current-limitations) before treating its output as
-> production-ready.
+> This is a research notebook, not a packaged or autonomous agent. Stage 1 has
+> rendered clips in the saved Colab run. Stage 2 currently demonstrates the
+> agent's planning and invalidation logic only: edited and inserted durations
+> are mocked, local realignment is not implemented, and the resulting clip
+> actions are not executed. Review [Known limitations](#known-limitations)
+> before using any output.
 
 ## Repository contents
 
 | File | Purpose |
 | --- | --- |
-| `project notebook_v1.ipynb` | Colab prototype containing Stage 1 (alignment and clipping) and Stage 2 (incremental decisions). |
-| `brewster_kahle_transcript.json` | Original 140-segment Brewster Kahle transcript; no segments are selected for clipping. |
-| `brewster_kahle_transcript_flagged.json` | The same transcript with 16 `make_clip` selections and clip titles. |
-| `brewster_kahle_transcript_with_ground_truth.json` | Transcript copy with source timestamps for evaluation. These timestamps are test/reference data, not required input to the alignment flow. |
+| `project_notebook_v1.ipynb` | Colab prototype containing the baseline clip pipeline and incremental-rerun planner. |
+| `brewster_kahle_transcript.json` | Original 140-segment text transcript; all `make_clip` values are false. |
+| `brewster_kahle_transcript_flagged.json` | Producer-tagged copy with 16 segments selected for clipping and titled. |
+| `brewster_kahle_transcript_with_ground_truth.json` | Reference copy with source timestamps for future evaluation; it is not model input in the notebook. |
 | `LICENSE` | MIT license. |
 
-The source video is intentionally not stored in this repository. The notebook
-expects it, transcripts, models, and generated artifacts to live in Google
-Drive.
+The one-hour Brewster Kahle interview video and the generated artifacts are not
+stored in Git. The notebook reads and writes those files in Google Drive.
 
-## What has been built
+## What the notebook currently demonstrates
 
-### Stage 1: baseline pipeline
+### Stage 1 — establish a baseline
 
-The notebook now demonstrates:
+The current notebook:
 
-1. mounting Google Drive and locating a source MP4 and JSON transcript;
-2. selecting segments marked with `"make_clip": true`;
-3. estimating coarse boundaries from transcript word counts;
-4. aligning the known transcript against extracted 16 kHz mono audio with
-   WhisperX's wav2vec2/CTC aligner;
-5. mapping word-level timing back to the original transcript segments;
-6. generating padded H.264/AAC MP4 clips with `ffmpeg`; and
-7. writing `manifest.json` and `state.json`, including segment text hashes,
-   timing, confidence, provenance, and run history.
+1. mounts Drive and recursively finds the original transcript, its flagged
+   copy, and the Brewster Kahle interview MP4;
+2. reads `make_clip` and `clip_title` metadata from the flagged transcript;
+3. probes the 3,613.3-second source with `ffprobe` and extracts 16 kHz mono WAV
+   audio with `ffmpeg`;
+4. runs WhisperX's `small` ASR model to obtain an audio-backed word stream;
+5. CTC-aligns that stream, uses `SequenceMatcher` to associate the known
+   transcript with ASR words, then maps aligned words back to the 140 producer
+   segments;
+6. creates four `_check_<segment>.wav` snippets for human boundary review;
+7. renders each of the 16 selected segments with frame-accurate seeking,
+   H.264/AAC encoding, 0.15 seconds of leading padding, and 0.35 seconds of
+   trailing padding; and
+8. writes a clip `manifest.json` plus a reusable `state.json` containing short
+   SHA-256 text fingerprints, timestamps, confidence, clip flags, and run
+   history.
 
-The saved notebook output records a successful alignment of 140 Brewster Kahle
-segments (9,043 words, none unresolved) and includes audio spot checks across
-the hour-long source. Other persisted outputs in later cells come from an
-earlier 149-segment AI-ethics experiment; see the limitations below.
+The saved run produced `clip_001.mp4` through `clip_016.mp4`. It is useful
+evidence that the flow can render media, but not proof that every boundary is
+correct. The same output reports 8,221 of 9,035 normalized transcript words
+matched in the first global diff, 17 weak segment matches, a later 10-word
+count mismatch during positional re-attribution, and 2 unresolved segments.
+Those warnings make the listening checks mandatory.
 
-### Stage 2: incremental-processing prototype
+### Stage 2 — plan an incremental rerun
 
-The second stage demonstrates the intended agent behavior on an old and edited
-transcript:
+Given the old transcript, Stage 1 state, and a proposed
+`brewster_kahle_transcript_flagged_v2.json`, the notebook is intended to:
 
-- exact SHA-256 text fingerprints and `difflib.SequenceMatcher` classify
-  unchanged, edited, inserted, and deleted segments;
-- `all-MiniLM-L6-v2` sentence embeddings distinguish a minor reword from an
-  unrelated replacement (the recorded example scores `0.948` versus a `0.85`
-  threshold);
-- a per-segment decision engine emits `REUSE`, `PATCH`, `FULL_REALIGN`, `NEW`,
-  `VERIFY_SHIFT`, or `REMOVE`, with a plain-language reason;
-- cumulative downstream timing shifts are propagated across multiple changes;
-- decisions are appended to `decisions.log`; and
-- clip validity is evaluated separately, because unchanged text may still need
-  a recut when an upstream edit moves its timestamp.
+- verify that the old transcript still matches the hashes in `state.json`;
+- classify exact text changes as unchanged, edited, inserted, or deleted with
+  `SequenceMatcher`;
+- cache `all-MiniLM-L6-v2` sentence embeddings by text hash and use cosine
+  similarity to distinguish a minor reword from a substantial rewrite;
+- plan transcript actions: `REUSE`, `PATCH`, `FULL_REALIGN`, `NEW`,
+  `VERIFY_SHIFT`, and `REMOVE`;
+- estimate and propagate a cumulative timing delta for the synthetic revision;
+- append the plan and explanations to `decisions.log`; and
+- separately plan `REUSE_CLIP`, `RECUT`, `CUT_NEW`, or `RETIRE_CLIP`, because a
+  clip with unchanged text can still become stale after an upstream time shift.
 
-This proves the control flow and invalidation rules. It does **not** yet perform
-the real local re-alignment or recut work selected by those decisions.
+The v2 fixture is **not included in this repository**, and the saved Stage 2
+run is incomplete. The notebook records both a local-upload/variable-order
+`NameError` and a later Drive lookup failure. It also calls
+`difflib.SequenceMatcher` without importing the `difflib` module. These issues
+must be corrected in the Colab session before the planner can run end to end;
+see the exact workaround below.
 
-## Transcript format
+## Input contract
 
-Input JSON has a top-level `video_id` and ordered `segments`:
+The transcript is ordered JSON with a stable `video_id` and stable, unique
+segment IDs:
 
 ```json
 {
@@ -101,30 +120,28 @@ Input JSON has a top-level `video_id` and ordered `segments`:
 }
 ```
 
-Segment IDs should be stable and unique between revisions. Segment order must
-match spoken order. Set `make_clip` to `true` only for segments that should
-produce clips; `clip_title` is expected for selected segments.
+Requirements for reliable reruns:
 
-## How to run the current prototype
+- segments must remain in spoken order;
+- IDs must be unique and should remain stable across revisions;
+- `text` should represent the spoken words as closely as possible;
+- `make_clip: true` selects a segment for rendering; and
+- selected segments should have a `clip_title`.
 
-### Prerequisites
+The included ground-truth timestamps are evaluation data. Do not feed them
+into the alignment path if the goal is an honest test of timestamp recovery.
 
-- a Google account with Drive access;
-- a Colab runtime (a GPU is recommended, although the notebook selects CPU when
-  CUDA is unavailable);
-- the source interview MP4;
-- `ffmpeg` and `ffprobe` (already available in standard Colab runtimes); and
-- internet access for the WhisperX and sentence-transformer packages/models.
+## Run the pipeline in Google Colab
 
-### 1. Prepare Google Drive
+### 1. Prepare Drive and Colab
 
-Create this directory:
+Use a GPU runtime if available and create:
 
 ```text
 MyDrive/Projects/LEC AI Project/
 ```
 
-Upload the following files somewhere below it:
+Place these inputs beneath that directory:
 
 ```text
 brewster_kahle_transcript.json
@@ -132,157 +149,182 @@ brewster_kahle_transcript_flagged.json
 Brewster Kahle - Interview - 26 Feb 2021.mp4
 ```
 
-The notebook searches recursively, so the files may be inside a
-`brewster_kahle/` subdirectory. Avoid duplicate filenames: the current code
-uses the first recursive match.
+They may be inside a `brewster_kahle/` child directory because the ingest code
+searches recursively. Avoid duplicate names: the notebook silently takes the
+first match. For another project, change `DRIVE_ROOT`, all transcript search
+patterns, the video glob, and `VIDEO_DIR` in the notebook.
 
-If using another video, update `DRIVE_ROOT`, transcript filename patterns, and
-the `*Brewster Kahle*Interview*.mp4` pattern in the ingest cells. Do not use the
-included ground-truth timestamps as model input if you want an honest alignment
-evaluation.
+Open **`project_notebook_v1.ipynb`** in Colab. The notebook installs WhisperX,
+PyTorch/TorchAudio/TorchVision, NumPy, and later `sentence-transformers`, and it
+downloads model weights. A standard Colab runtime already supplies `ffmpeg` and
+`ffprobe`; internet access is needed for packages and models.
 
-### 2. Open the notebook in Colab
+> [!CAUTION]
+> The dependency cells are exploratory rather than pinned: they reinstall the
+> Torch stack and then request `numpy<2.1`, while the saved installation output
+> says the installed WhisperX requires NumPy 2.1 or newer. Run installation
+> cells first, restart if Colab asks, and verify imports before spending time on
+> the hour-long alignment. A reproducible lockfile is not yet provided.
 
-Upload or open `project notebook_v1.ipynb` in Google Colab. Start with a fresh
-runtime, mount Drive when prompted, and run the Stage 1 cells in order.
+### 2. Run Stage 1 in order
 
-The dependency cells install WhisperX and PyTorch. Package versions in Colab
-change over time; restart the runtime after installation if Colab requests it,
-then rerun from the first import cell. The saved notebook contains one recorded
-`GenerationMixin` import error from an incompatible package combination, even
-though later saved outputs show alignment results. A reproducible dependency
-lock is still outstanding.
+Run cells from `# Stage 1` through `## Phase 5: Exporting the clips` in order.
+The operational sequence is:
 
-### 3. Verify alignment before cutting clips
+1. **Ingest:** mount Drive; confirm the notebook reports 140 segments, the
+   expected video, and a duration near 60.22 minutes.
+2. **Locate:** confirm that the flagged transcript prints the 16 intended clip
+   IDs and titles.
+3. **Align:** extract audio, run ASR, associate known transcript text to the ASR
+   timeline, and perform CTC refinement. Do not confuse the proportional rough
+   boundaries with final timestamps.
+4. **Validate:** inspect all warnings and listen to `_check_seg_005.wav`,
+   `_check_seg_057.wav`, `_check_seg_108.wav`, and `_check_seg_071.wav`. Confirm
+   each clip begins and ends on the expected speech, especially late in the
+   video.
+5. **Cut and export:** only after validation, run the `ffmpeg` cutting cell and
+   the manifest/state export cell.
 
-Do not rely only on the `aligned` label. Listen to the generated `_check_*.wav`
-snippets and confirm that the expected sentence starts and ends at the spoken
-words. Also confirm:
+Before accepting the run, verify that selected segments have non-null bounds,
+bounds are monotonic and inside the media duration, clip files play correctly,
+and manifest times describe the intended source speech. The current cutting
+cell does not guard against unresolved selected segments, so this review is a
+required safety gate rather than an optional spot check.
 
-- transcript and aligned word counts match;
-- all segments have non-null start/end times;
-- start/end values remain within the media duration; and
-- the late-video spot checks have not drifted.
+### 3. Inspect and preserve the baseline
 
-Only then run the cutting and export cells.
-
-### 4. Inspect Stage 1 outputs
-
-The notebook writes beneath the configured Drive run directory:
+Stage 1 writes:
 
 ```text
-brewster_kahle/
+MyDrive/Projects/LEC AI Project/brewster_kahle/
 ├── interview_audio.wav
+├── _check_seg_005.wav
+├── _check_seg_057.wav
+├── _check_seg_071.wav
+├── _check_seg_108.wav
 ├── clips/
-│   └── clip_001.mp4
+│   ├── clip_001.mp4
+│   └── ...
+│       └── clip_016.mp4
 ├── manifest.json
 └── state.json
 ```
 
-`manifest.json` describes rendered files and their source segments.
-`state.json` is the baseline for the next run and stores hashes and resolved
-timings. Keep both alongside the clips and do not overwrite them until the new
-run has been validated.
+`manifest.json` connects each rendered file to its segment, title, unpadded
+aligned interval, confidence, and text. `state.json` is the incremental run's
+baseline. Back up the clips, manifest, and state together before experimenting
+with an edited transcript.
 
-### 5. Exercise Stage 2 carefully
+### 4. Exercise the Stage 2 planner
 
-Stage 2 currently references experiment files named
-`transcript_ai_ethics_flagged.json` and
-`transcript_ai_ethics_flagged_v2.json`; those files are **not in this
-repository**. To exercise it, provide a matching old/new pair in Drive or change
-the two filename patterns to your own revisions. The old transcript must be the
-exact file used to create the existing `state.json`, or its hash check will
-warn.
+Create an edited copy named `brewster_kahle_transcript_flagged_v2.json`. Keep
+unchanged IDs stable; use new IDs for genuine insertions. Put this file beneath
+`DRIVE_ROOT` so the Stage 2 recursive lookup can find it.
 
-Run Stage 2 only after Stage 1 has created `state.json` and `manifest.json`.
-Review the printed diff and semantic scores, then review `decisions.log` and the
-clip decision summary. Treat all timestamps labeled `MOCKED` as simulations;
-do not publish clips from them.
+In a session where Stage 1 has already initialized its variables and artifacts:
 
-## Current limitations
+1. skip the local `files.upload()` cell and the immediately following cell;
+2. before the old/new transcript lookup cell, run:
 
-- **Notebook-only:** there is no `cli.py`, installable package, configuration
-  file, automated pipeline, or test suite yet.
-- **Mixed experiment state:** saved cell outputs include both the 140-segment
-  Brewster Kahle run and a prior 149-segment AI-ethics run. Variables and Drive
-  paths must be normalized before `Run all` is safe.
-- **Stale/error outputs:** the notebook preserves an import error and a
-  `NameError` in its execution history. A clean, top-to-bottom reproducibility
-  run has not been captured.
-- **Approximate initial windows:** rough boundaries assume speaking time is
-  proportional to word count, which can fail with silence, introductions,
-  music, or transcript omissions.
-- **Fragile word attribution:** timing is assigned positionally and requires
-  the transcript's whitespace word count to exactly match WhisperX output.
-- **Synthetic second run:** edited/inserted durations use average seconds per
-  word. Real audio for the revision is not locally re-aligned.
-- **In-memory embedding cache:** embeddings are not persisted between runtime
-  sessions.
-- **Decision/execution gap:** Stage 2 selects recuts and retirements but does not
-  execute them or write a new manifest/state atomically.
-- **No acceptance metrics:** the ground-truth fixture is not yet used to report
-  timing error, precision/recall, or clip-boundary quality.
+   ```python
+   import difflib
+   ```
 
-## What to build next
+3. run the lookup cell and confirm the state hash sanity check passes;
+4. run the exact diff and embedding cells, then inspect every non-unchanged
+   classification and semantic score;
+5. run the decision, mocked delta propagation, and log cells; and
+6. run the clip-reuse decision cell to inspect the proposed media operations.
 
-With more development time, complete the agent in this order:
+Do **not** treat `resolved_v2`, `decisions.log`, or the clip decision summary as
+production output. Any reason containing `MOCKED` uses an average
+seconds-per-word estimate, not audio evidence. The planner does not call
+WhisperX on a changed window, render/retire files, or write a validated v2
+manifest and state.
 
-1. **Make the notebook reproducible.** Separate Brewster and AI-ethics
-   experiments, remove reliance on stale in-memory variables, pin compatible
-   Python/PyTorch/WhisperX versions, and capture one clean top-to-bottom run.
-2. **Evaluate alignment.** Compare predicted boundaries with
-   `brewster_kahle_transcript_with_ground_truth.json`; report median, p95, and
-   worst-case start/end error and fail when tolerances are exceeded.
-3. **Implement real patch alignment.** Build a bounded audio window around an
-   edited or inserted segment, align its new text, calculate the measured
-   duration delta, and verify anchors on both sides before shifting downstream
-   timestamps. Fall back to full alignment when confidence is low.
-4. **Persist all caches.** Store embeddings by text hash, alignments by media
-   fingerprint + segment/context hash, and clips by source fingerprint + time
-   range + render settings. Include model and schema versions in every key.
-5. **Execute clip decisions.** Reuse valid files, render `CUT_NEW`/`RECUT`, move
-   retired clips safely, and write new manifest/state/log files via an atomic
-   transaction so a failed run cannot corrupt the last good state.
-6. **Extract a real agent and CLI.** Move notebook functions into modules and
-   expose commands such as `init`, `plan`, `apply`, and `verify`. Support a dry
-   run that prints the plan without changing artifacts.
-7. **Add safety and observability.** Validate schemas and stable IDs, detect
-   duplicate Drive matches, fingerprint the source media, log model versions
-   and confidence, and retain a machine-readable decision history.
-8. **Add automated tests.** Cover unchanged transcripts, typo-only edits,
-   insertions, deletions, reorderings, changed clip flags, timestamp cascading,
-   interrupted writes, and ffmpeg output duration.
-9. **Add production export features.** Once correctness is measured, add
-   captions, vertical framing, platform presets, and optional human approval
-   before publishing.
+## Artifact roles in an eventual clipping agent
 
-### Suggested target interface
+| Artifact | Agent use |
+| --- | --- |
+| `manifest.json` | Inventory of rendered clips and provenance for deciding whether an existing file remains valid. |
+| `state.json` | Trusted prior transcript fingerprints and resolved timing used to avoid blind full reruns. |
+| `decisions.log` | Auditable explanation of the proposed transcript-level actions and timing shifts. |
+| `clips/*.mp4` | Reusable outputs when both source selection and verified bounds remain unchanged. |
 
-The future packaged agent could be operated as follows:
+This separation is central to the agent design: **planning** decides what work
+is necessary, **execution** performs alignment and rendering, and
+**verification** decides whether new state may replace the trusted baseline.
+Only planning is prototyped for incremental runs today.
+
+## Known limitations
+
+- **Notebook-only:** there is no CLI, package, config schema, automated test
+  suite, or non-interactive runner.
+- **Not cleanly reproducible:** dependency versions are unpinned and saved
+  outputs include installation conflicts, a `NameError`, and a missing-v2-file
+  error.
+- **Stage 1 attribution warning:** the transcript/WhisperX word counts differ by
+  10, so positional mapping can drift after the first tokenization difference;
+  17 segments were weak in the preceding global match and 2 ended unresolved.
+- **Approximate bootstrapping:** proportional rough timing assumes speaking time
+  follows word count and does not model silence, introductions, music, or
+  transcript omissions.
+- **Human validation only:** the ground-truth fixture is not used to calculate
+  median, p95, or worst-case boundary error.
+- **Missing Stage 2 fixture:**
+  `brewster_kahle_transcript_flagged_v2.json` is not committed.
+- **Synthetic incremental timing:** patches, insertions, deletions, and
+  downstream shifts are estimated rather than measured from audio.
+- **In-memory embedding cache:** embeddings disappear when the runtime ends.
+- **Decision/execution gap:** proposed recuts, new clips, retirements, and state
+  updates are not applied atomically—or applied at all—in Stage 2.
+- **Weak integrity model:** source media and render settings are not
+  fingerprinted, and duplicate recursive matches are not rejected.
+
+## Roadmap to a runnable agent
+
+1. Make one clean Colab run reproducible with pinned, compatible dependencies
+   and remove stale/error cells.
+2. Replace positional word attribution with robust per-segment/context matching
+   and explicit confidence thresholds.
+3. Evaluate predicted boundaries against the ground-truth fixture and fail runs
+   outside defined tolerances.
+4. Implement bounded local alignment with left/right anchors, measured timing
+   deltas, and full-alignment fallback.
+5. Persist alignment and embedding caches using media, model, schema, text, and
+   render-setting fingerprints.
+6. Implement clip reuse/recut/retirement and atomically commit the new manifest,
+   state, clips, and decision history only after verification succeeds.
+7. Extract notebook functions into a tested package and add a dry-run planner,
+   structured logs, schema validation, and recovery from interrupted writes.
+
+### Intended command-line experience
+
+The notebook's stages map naturally to a future interface such as:
 
 ```bash
-# Establish a trusted baseline.
+# Build and verify the trusted baseline.
 python -m video_agent init \
   --video input/interview.mp4 \
-  --transcript input/transcript.json \
+  --transcript input/brewster_kahle_transcript_flagged.json \
   --workspace runs/brewster
 
-# Explain work without modifying files.
+# Explain reuse, alignment, and clip work without changing files.
 python -m video_agent plan \
-  --transcript input/transcript_v2.json \
+  --transcript input/brewster_kahle_transcript_flagged_v2.json \
   --workspace runs/brewster
 
-# Align changed windows, reuse or recut clips, and atomically commit new state.
+# Execute measured alignment/render actions and atomically update state.
 python -m video_agent apply \
-  --transcript input/transcript_v2.json \
+  --transcript input/brewster_kahle_transcript_flagged_v2.json \
   --workspace runs/brewster
 
-# Check manifest, boundaries, hashes, and media outputs.
+# Validate hashes, boundaries, manifests, and rendered media.
 python -m video_agent verify --workspace runs/brewster
 ```
 
-These commands describe the desired end state; they are **not implemented** in
-the current repository.
+These commands demonstrate how the completed clipping agent should be run;
+they are **not implemented in this repository**.
 
 ## License
 
