@@ -86,4 +86,4 @@ The first version of the alignment lined up transcript text to audio one line at
 
 ## Next steps
 
-See `docs/build-plan.md` for the full list. Highest priority: replace the mocked duration estimate with a real windowed re-alignment call, and extract the working pipeline logic out of the notebook into version-controlled `.py` modules with a CLI entry point and tests.
+My next priority would be to extract the working pipeline logic out of the notebook into version-controlled `.py` modules with a CLI entry point and tests.
