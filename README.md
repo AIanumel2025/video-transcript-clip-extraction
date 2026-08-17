@@ -19,18 +19,22 @@ Video and podcast teams re-edit transcripts constantly — a correction here, a 
 ## Repository layout
 
 ```
-notebook/                  the working notebook, run end to end, outputs included
-sample_input/
-  brewster_kahle_transcript_flagged.json      run 1 transcript (140 segments, 16 flagged)
-  brewster_kahle_transcript_flagged_v2.json   run 2 transcript (1 reworded, 1 deleted, 1 inserted)
-sample_output/
-  manifest_v1.json          run 1 manifest — 16 clips, all freshly cut
-  manifest.json             run 2 manifest — clips tagged REUSED or RECUT, with reasons
-  state.json                per-segment hashes + resolved timestamps + run_history (4 runs)
-  current_transcript.json   snapshot of the transcript state.json currently reflects
-  decisions.log             full reasoning trail — every decision, every run, human-readable
-docs/
-  build-plan.md              design notes: caching strategy, decision-engine rules, open items
+├── notebook/
+│   └── the working notebook, run end to end, outputs included
+│
+├── sample_input/
+│   ├── brewster_kahle_transcript_flagged.json      run 1 transcript (140 segments, 16 flagged)
+│   └── brewster_kahle_transcript_flagged_v2.json   run 2 transcript (1 reworded, 1 deleted, 1 inserted)
+│
+├── sample_output/
+│   ├── manifest_v1.json          run 1 manifest — 16 clips, all freshly cut
+│   ├── manifest.json             run 2 manifest — clips tagged REUSED or RECUT, with reasons
+│   ├── state.json                per-segment hashes + resolved timestamps + run_history (4 runs)
+│   ├── current_transcript.json   snapshot of the transcript state.json currently reflects
+│   └── decisions.log             full reasoning trail — every decision, every run, human-readable
+│
+└── docs/
+    └── build-plan.md             design notes: caching strategy, decision-engine rules, open items
 ```
 
 The source video/audio and the 16 rendered MP4 clips aren't included here — see [Running it yourself](#running-it-yourself). Source video/audio and its output clips will be demonstrated in walkthrough.
