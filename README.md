@@ -33,7 +33,7 @@ docs/
   build-plan.md              design notes: caching strategy, decision-engine rules, open items
 ```
 
-The source video/audio and the 16 rendered MP4 clips aren't included here — see [Running it yourself](#running-it-yourself).
+The source video/audio and the 16 rendered MP4 clips aren't included here — see [Running it yourself](#running-it-yourself). Source video/audio and its output clips will be demonstrated in walkthrough.
 
 ## Results
 
@@ -72,6 +72,13 @@ The notebook was built and run in Google Colab, with the source video/audio and 
 3. Edit your transcript (or drop in `sample_input/brewster_kahle_transcript_flagged_v2.json` as a worked example) and run Stage 2: diff → embed → decide → commit. Only the segments the decision engine flags as `RECUT` or `NEW` actually get re-rendered.
 
 Requires: `whisperx`, `torch`, `sentence-transformers`, `ffmpeg` on PATH. GPU is optional — whisperx runs on CPU with `compute_type="int8"`, just slower; the ffmpeg cutting step is CPU-bound regardless (`libx264`/`aac` re-encoding isn't GPU-accelerated by whisperx's GPU usage).
+
+## Edge Cases Handled
+
+1. Making sure timestamps came from the real audio, not a guess.
+An earlier approach assumed people speak at a constant, even pace and just divided up time accordingly. This doesn't really apply in real speech. Conversational speech often carries pauses, talking over each other and even long pauses for laughs. We fixed this by running real speech-to-text on the actual audio first, so every word got its own real timestamp based on when it was actually spoken.
+2. Fixing timestamps that got progressively more wrong the further into the video you went.
+The first version of the alignment lined up transcript text to audio one line at a time, moving forward step by step. Whenever one line didn't match perfectly, the next line started searching from the wrong spot. This made small errors stack up on top of each other the further into the interview you got. The fix was to stop doing it line-by-line and instead compare the entire transcript against the entire audio transcript at once, so one bad match couldn't throw off everything after it.
 
 ## Next steps
 
